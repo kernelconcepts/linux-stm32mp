@@ -175,6 +175,7 @@ struct stm32_usart_info stm32h7_info = {
 #define USART_CR2_CPHA		BIT(9)
 #define USART_CR2_CPOL		BIT(10)
 #define USART_CR2_CLKEN		BIT(11)
+#define USART_CR2_STOP_1_5B BIT(12) | BIT(13)
 #define USART_CR2_STOP_2B	BIT(13)
 #define USART_CR2_STOP_MASK	GENMASK(13, 12)
 #define USART_CR2_LINEN		BIT(14)
@@ -218,8 +219,11 @@ struct stm32_usart_info stm32h7_info = {
 #define USART_CR3_TXFTCFG_SHIFT	29		/* H7 */
 
 /* USART_GTPR */
-#define USART_GTPR_PSC_MASK	GENMASK(7, 0)
+#define USART_GTPR_PSC_MASK_IR	GENMASK(7, 0)
+#define USART_GTPR_PSC_MASK_SC  GENMASK(4, 0)
 #define USART_GTPR_GT_MASK	GENMASK(15, 8)
+#define USART_GTPR_PSC_SHIFT     0
+#define USART_GTPR_GT_SHIFT	     8
 
 /* USART_RTOR */
 #define USART_RTOR_RTO_MASK	GENMASK(23, 0)	/* F7 */
@@ -278,6 +282,11 @@ struct stm32_port {
 	int rdr_mask;		/* receive data register mask */
 	struct mctrl_gpios *gpios; /* modem control gpios */
 	struct dma_tx_state rx_dma_state;
+	u32 backup_cr1;     /* cr1 saved during iso7816 operations */
+	u32 backup_cr2;     /* cr2 saved during iso7816 operations */
+	u32 backup_cr3;     /* cr3 saved during iso7816 operations */
+	u32 backup_brr;     /* brr saved during iso7816 operations */
+	u32 backup_gtpr;    /* gtpr saved during iso7816 operations */
 };
 
 static struct stm32_port stm32_ports[STM32_MAX_PORTS];
