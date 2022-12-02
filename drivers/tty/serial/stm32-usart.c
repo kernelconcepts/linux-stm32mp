@@ -201,19 +201,37 @@ static unsigned int stm32_usart_calc_iso7816_psc(struct uart_port *port,
 	mck_rate = (u64)clk_get_rate(stm32_port->clk);
 	do_div(mck_rate, iso7816conf->clk * 2);
 	psc = mck_rate;
+
+    dev_dbg(port->dev, "==== stm32_usart_calc_iso7816_psc ====\n");
+    dev_dbg(port->dev, "MCK: %d\n",clk_get_rate(stm32_port->clk));
+    dev_dbg(port->dev, "CLK: %d\n",iso7816conf->clk); 
+    dev_dbg(port->dev, "PSC: %d\n",psc);    
+    dev_dbg(port->dev, "Real CLK: %d\n", clk_get_rate(stm32_port->clk) / 2 / psc );
+    iso7816conf->clk = clk_get_rate(stm32_port->clk) / 2 / psc;    
+    
+    dev_dbg(port->dev, "==== =================================\n");
+      
 	return psc;
 }
 
-static unsigned int stm32_usart_calc_iso7816_br(struct uart_port *port,
+static unsigned int stm32_usart_calc_iso7816_fidi(struct uart_port *port,
 				    struct serial_iso7816 *iso7816conf)
 {
-	u64 br = 0;
+	u64 fidi = 0;
+
+    dev_dbg(port->dev, "==== stm32_usart_calc_iso7816_fidi ====\n");
+    dev_dbg(port->dev, "Fi: %d, Di: %d\n", iso7816conf->sc_fi, iso7816conf->sc_di);
+    dev_dbg(port->dev, "CLK: %d\n",iso7816conf->clk);
 
 	if (iso7816conf->sc_fi && iso7816conf->sc_di) {
-		br = (u64)iso7816conf->clk * (u64)iso7816conf->sc_fi;
-		do_div(br, iso7816conf->sc_di);
+		fidi = (u64)iso7816conf->sc_fi;
+		do_div(fidi, iso7816conf->sc_di);	
 	}
-	return (u32)br;
+	
+	dev_dbg(port->dev, "BR:  %d\n", iso7816conf->clk / (u32)fidi);
+	
+    dev_dbg(port->dev, "===================================\n");      	
+	return fidi;
 }
 
 
@@ -225,21 +243,23 @@ static int stm32_usart_config_iso7816(struct uart_port *port,
 	struct stm32_port *stm32_port = to_stm32_port(port);
 	const struct stm32_usart_offsets *ofs = &stm32_port->info->ofs;	
 	const struct stm32_usart_config *cfg = &stm32_port->info->cfg;
-	u32 cr1, cr2, cr3, gtpr, br;
+	u32 cr1, cr2, cr3, gtpr, brr;
 	u32 psc;
 	int ret = 0;   
 	
 	stm32_usart_clr_bits(port, ofs->cr1, BIT(cfg->uart_enable_bit));
 	
     dev_dbg(port->dev, "==== stm32_usart_config_iso7816 ====\n");
+    dev_dbg(port->dev, "CR1: Clear enable bit\n");
+    dev_dbg(port->dev, "==== ===============================\n");
 
 	if (iso7816conf->flags & SER_ISO7816_ENABLED) {
 	    // Check that uart is disabled!
 		// Get CR2 / CR3, disable CR2-LINEN CR3-HDSEL, CR3-IREN
 
-        // Enable CR2-CLKEN
-        // Enable CR2-SCEN
-
+        // Enable smartcard mode, before reading out the bits below...
+    	stm32_usart_set_bits(port, ofs->cr3, USART_CR3_SCEN);
+    	
 		if (iso7816conf->tg > 255) {
 			dev_err(port->dev, "ISO7816: Timeguard exceeding 255\n");
 			memset(iso7816conf, 0, sizeof(struct serial_iso7816));
@@ -267,17 +287,12 @@ static int stm32_usart_config_iso7816(struct uart_port *port,
 		cr1 &= ~USART_CR1_PS;
 
         /* Configure 1.5 stop bits */
-        /* Enable parity generation, set even parity */
-		cr2 &= ~USART_CR2_STOP_MASK;
-		cr1 &= ~USART_CR1_PS;
+		cr2 |= USART_CR2_STOP_1_5B;
         		        
         /* Enable clock generation, 1st. edge, clock polarity low */
         cr2 &= ~(USART_CR2_CPHA | USART_CR2_CPOL);        		        
         cr2 |= USART_CR2_CLKEN;        		        
-        
-        /* Calc baudrate */
-        br = stm32_usart_calc_iso7816_br(port, iso7816conf);
-        
+                
 		if ((iso7816conf->flags & SER_ISO7816_T_PARAM)
 		    == SER_ISO7816_T(0)) {
 		    cr3 |= USART_CR3_NACK;
@@ -302,50 +317,64 @@ static int stm32_usart_config_iso7816(struct uart_port *port,
 			goto err_out;		
 		}
 		
-		br = stm32_usart_calc_iso7816_br(port, iso7816conf);
-		if (br == 0) {
+		brr = stm32_usart_calc_iso7816_fidi(port, iso7816conf) * psc * 2;
+		if (brr == 0) {
 			dev_warn(port->dev, "ISO7816 Invalid Fi/Di value\n");
 			memset(iso7816conf, 0, sizeof(struct serial_iso7816));
 			ret = -EINVAL;
 			goto err_out;
 		}
-				
+			
 		gtpr = (iso7816conf->tg << USART_GTPR_GT_SHIFT) & USART_GTPR_GT_MASK;
         gtpr |= psc & USART_GTPR_PSC_MASK_SC;
 		
 		if (!(port->iso7816.flags & SER_ISO7816_ENABLED)) {
 			/* port not yet in iso7816 mode: store configuration */
+			stm32_port->backup_brr = readl_relaxed(port->membase + ofs->brr);
+			stm32_port->backup_gtpr = readl_relaxed(port->membase + ofs->gtpr);
+
 			stm32_port->backup_cr1 = readl_relaxed(port->membase + ofs->cr1);
 			stm32_port->backup_cr2 = readl_relaxed(port->membase + ofs->cr1);
 			stm32_port->backup_cr3 = readl_relaxed(port->membase + ofs->cr1);
-			stm32_port->backup_brr = readl_relaxed(port->membase + ofs->brr);
-			stm32_port->backup_gtpr = readl_relaxed(port->membase + ofs->gtpr);
 		}			
+
+		writel_relaxed(gtpr, port->membase + ofs->gtpr);
+		writel_relaxed(brr, port->membase + ofs->brr);
 		
         writel_relaxed(cr1, port->membase + ofs->cr1);
 		writel_relaxed(cr2, port->membase + ofs->cr2);
         writel_relaxed(cr3, port->membase + ofs->cr3);		
-
-		writel_relaxed(gtpr, port->membase + ofs->gtpr);
-		writel_relaxed(br, port->membase + ofs->brr);				
+		
+        dev_dbg(port->dev, "==== stm32_usart_config_iso7816() ====");
+        dev_dbg(port->dev, "CR1: %08x\n", cr1);
+        dev_dbg(port->dev, "CR2: %08x\n", cr2);
+        dev_dbg(port->dev, "CR3: %08x\n", cr3);
+        dev_dbg(port->dev, "GTPR: %08x\n", gtpr);
+        dev_dbg(port->dev, "BRR : %08x\n", brr);
+        dev_dbg(port->dev, "===================================");					
     } else {
         dev_dbg(port->dev, "Setting UART back to RS232\n");
         /* back to last RS232 settings */
    		memset(iso7816conf, 0, sizeof(struct serial_iso7816));
     
+        // Disable smartcard mode, manually...
+    	stm32_usart_clr_bits(port, ofs->cr3, USART_CR3_SCEN);    
+    
+		writel_relaxed(stm32_port->backup_gtpr, port->membase + ofs->gtpr);
+		writel_relaxed(stm32_port->backup_brr, port->membase + ofs->brr);				
+        
         writel_relaxed(stm32_port->backup_cr1, port->membase + ofs->cr1);
 		writel_relaxed(stm32_port->backup_cr2, port->membase + ofs->cr2);
         writel_relaxed(stm32_port->backup_cr3, port->membase + ofs->cr3);		
-
-		writel_relaxed(stm32_port->backup_gtpr, port->membase + ofs->gtpr);
-		writel_relaxed(stm32_port->backup_brr, port->membase + ofs->brr);				
     }
     port->iso7816 = *iso7816conf;    
 
 err_out:
 	/* Enable interrupts */
 	stm32_usart_set_bits(port, ofs->cr1, BIT(cfg->uart_enable_bit));
-
+    dev_dbg(port->dev, "==== stm32_usart_config_iso7816() ====");
+    dev_dbg(port->dev, "CR1: Set enable bit\n");
+    dev_dbg(port->dev, "===================================");	
 	return ret;    
 }
 
@@ -1149,6 +1178,10 @@ static int stm32_usart_startup(struct uart_port *port)
 		val = readl_relaxed(port->membase + ofs->cr2);
 		val |= USART_CR2_SWAP;
 		writel_relaxed(val, port->membase + ofs->cr2);
+		
+        dev_dbg(port->dev, "==== stm32_usart_startup() ====");
+        dev_dbg(port->dev, "CR2: %08x\n", val);
+        dev_dbg(port->dev, "===================================");		
 	}
 
 	/* RX FIFO Flush */
@@ -1167,6 +1200,10 @@ static int stm32_usart_startup(struct uart_port *port)
 	val = stm32_port->cr1_irq | USART_CR1_RE | BIT(cfg->uart_enable_bit);
 	stm32_usart_set_bits(port, ofs->cr1, val);
 
+    dev_dbg(port->dev, "==== stm32_usart_config_iso7816() ====");
+    dev_dbg(port->dev, "CR1: Set enable bit\n");
+    dev_dbg(port->dev, "===================================");	
+    
 	return 0;
 }
 
@@ -1232,7 +1269,7 @@ static void stm32_usart_set_termios(struct uart_port *port,
 	unsigned long flags;
 	int ret;
 
-    dev_dbg(port->dev, "==== stm32_usart_set_termios ====\n");
+    dev_dbg(port->dev, "==== stm32_usart_set_termios() ====");
 
 	if (!stm32_port->hw_flow_control)
 		cflag &= ~CRTSCTS;
@@ -1364,6 +1401,8 @@ static void stm32_usart_set_termios(struct uart_port *port,
 	    mantissa = (usartdiv / oversampling) << USART_BRR_DIV_M_SHIFT;
 	    fraction = usartdiv % oversampling;
 	    writel_relaxed(mantissa | fraction, port->membase + ofs->brr);
+	    
+	    dev_dbg(port->dev, "BRR : %08x\n", mantissa | fraction);	    
 
 	    uart_update_timeout(port, cflag, baud);
     }
@@ -1430,8 +1469,18 @@ static void stm32_usart_set_termios(struct uart_port *port,
 	writel_relaxed(cr3, port->membase + ofs->cr3);
 	writel_relaxed(cr2, port->membase + ofs->cr2);
 	writel_relaxed(cr1, port->membase + ofs->cr1);
-
+	
+	dev_dbg(port->dev, "CR1: %08x\n", cr1);
+	dev_dbg(port->dev, "CR2: %08x\n", cr2);
+	dev_dbg(port->dev, "CR3: %08x\n", cr3);
+	dev_dbg(port->dev, "===================================");
+	
 	stm32_usart_set_bits(port, ofs->cr1, BIT(cfg->uart_enable_bit));
+	
+    dev_dbg(port->dev, "==== stm32_usart_config_iso7816() ====");
+    dev_dbg(port->dev, "CR1: Set enable bit\n");
+    dev_dbg(port->dev, "===================================");	
+    	
 	spin_unlock_irqrestore(&port->lock, flags);
 
 	/* Handle modem control interrupts */
@@ -1938,6 +1987,10 @@ static int stm32_usart_serial_remove(struct platform_device *pdev)
 	cr3 &= ~USART_CR3_DMAT;
 	cr3 &= ~USART_CR3_DDRE;
 	writel_relaxed(cr3, port->membase + ofs->cr3);
+	
+    dev_dbg(port->dev, "==== stm32_usart_serial_remove() ====");
+    dev_dbg(port->dev, "CR3: %08x\n", cr3);
+    dev_dbg(port->dev, "=====================================");		
 
 	if (stm32_port->wakeup_src) {
 		dev_pm_clear_wake_irq(&pdev->dev);
@@ -2098,7 +2151,7 @@ static struct uart_driver stm32_usart_driver = {
 	.dev_name	= STM32_SERIAL_NAME,
 	.major		= 0,
 	.minor		= 0,
-	.nr		= STM32_MAX_PORTS,
+	.nr		    = STM32_MAX_PORTS,
 	.cons		= STM32_SERIAL_CONSOLE,
 };
 
