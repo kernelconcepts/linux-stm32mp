@@ -135,6 +135,9 @@ struct uart_port {
 						struct serial_rs485 *rs485);
 	int			(*iso7816_config)(struct uart_port *,
 						  struct serial_iso7816 *iso7816);
+	int			(*ibt_config)(struct uart_port *,
+						  struct serial_ibt *ibt);
+
 	unsigned int		irq;			/* irq number */
 	unsigned long		irqflags;		/* irq flags  */
 	unsigned int		uartclk;		/* base uart clock */
@@ -255,6 +258,7 @@ struct uart_port {
 	struct serial_rs485     rs485;
 	struct gpio_desc	*rs485_term_gpio;	/* enable RS485 bus termination */
 	struct serial_iso7816   iso7816;
+	struct serial_ibt       ibt;        /* interbyte timing configuration */
 	void			*private_data;		/* generic platform data pointer */
 };
 

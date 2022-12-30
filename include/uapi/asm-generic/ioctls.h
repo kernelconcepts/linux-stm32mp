@@ -81,6 +81,8 @@
 #define TIOCGPTPEER	_IO('T', 0x41) /* Safely open the slave */
 #define TIOCGISO7816	_IOR('T', 0x42, struct serial_iso7816)
 #define TIOCSISO7816	_IOWR('T', 0x43, struct serial_iso7816)
+#define TIOCGIBT	_IOR('T', 0x44, struct serial_ibt)    /* Get interbyte timing config */
+#define TIOCSIBT	_IOWR('T', 0x45, struct serial_ibt)   /* Set interbyte timing config */
 
 #define FIONCLEX	0x5450
 #define FIOCLEX		0x5451

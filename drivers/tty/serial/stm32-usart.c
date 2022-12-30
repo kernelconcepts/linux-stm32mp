@@ -191,6 +191,48 @@ static int stm32_usart_init_rs485(struct uart_port *port,
 	return uart_get_rs485_mode(port);
 }
 
+static int stm32_usart_config_ibt(struct uart_port *port,
+				    struct serial_ibt *ibtconf)
+{
+	struct stm32_port *stm32_port = to_stm32_port(port);
+	const struct stm32_usart_offsets *ofs = &stm32_port->info->ofs;
+	const struct stm32_usart_config *cfg = &stm32_port->info->cfg;
+
+
+	stm32_usart_clr_bits(port, ofs->cr1, BIT(cfg->uart_enable_bit));
+
+	port->ibt = *ibtconf;
+
+	stm32_port->ibt_time_ns = ktime_set(0, ibtconf->interbyte_time_ns);
+
+	stm32_usart_set_bits(port, ofs->cr1, BIT(cfg->uart_enable_bit));
+
+	return 0;
+}
+
+static enum hrtimer_restart stm32_usart_ibt_timer_function(struct hrtimer *ibt_timer)
+{
+	struct stm32_port *stm32_port = container_of(ibt_timer, struct stm32_port, ibt_timer);
+	const struct stm32_usart_offsets *ofs = &stm32_port->info->ofs;
+	u32 sr;
+
+	sr = readl_relaxed(stm32_port->port.membase + ofs->isr);
+
+	if ((sr & USART_SR_TXE) && !(stm32_port->tx_ch)) {
+
+		spin_lock(&stm32_port->port.lock);
+
+		if (stm32_port->port.ibt.enabled) {
+		    stm32_usart_transmit_chars(&stm32_port->port);
+		}
+
+		spin_unlock(&stm32_port->port.lock);
+	}
+
+	return HRTIMER_NORESTART;
+}
+
+
 static bool stm32_usart_rx_dma_started(struct stm32_port *stm32_port)
 {
 	return stm32_port->rx_ch ? stm32_port->rx_dma_busy : false;
@@ -547,6 +589,7 @@ static void stm32_usart_tx_dma_complete(void *arg)
 
 	/* Let's see if we have pending data to send */
 	spin_lock_irqsave(&port->lock, flags);
+
 	stm32_usart_transmit_chars(port);
 	spin_unlock_irqrestore(&port->lock, flags);
 }
@@ -562,8 +605,13 @@ static void stm32_usart_tx_interrupt_enable(struct uart_port *port)
 	 */
 	if (stm32_port->fifoen && stm32_port->txftcfg >= 0)
 		stm32_usart_set_bits(port, ofs->cr3, USART_CR3_TXFTIE);
-	else
-		stm32_usart_set_bits(port, ofs->cr1, USART_CR1_TXEIE);
+	else {
+	    if (stm32_port->support_ibt && port->ibt.enabled) {
+			stm32_usart_set_bits(port, ofs->cr1, USART_CR1_TCIE);
+	    } else {
+	        stm32_usart_set_bits(port, ofs->cr1, USART_CR1_TXEIE);
+	    }
+	}
 }
 
 static void stm32_usart_tx_interrupt_disable(struct uart_port *port)
@@ -573,8 +621,9 @@ static void stm32_usart_tx_interrupt_disable(struct uart_port *port)
 
 	if (stm32_port->fifoen && stm32_port->txftcfg >= 0)
 		stm32_usart_clr_bits(port, ofs->cr3, USART_CR3_TXFTIE);
-	else
-		stm32_usart_clr_bits(port, ofs->cr1, USART_CR1_TXEIE);
+	else {
+		stm32_usart_clr_bits(port, ofs->cr1, USART_CR1_TXEIE | USART_CR1_TCIE);
+	}
 }
 
 static void stm32_usart_transmit_chars_pio(struct uart_port *port)
@@ -588,8 +637,13 @@ static void stm32_usart_transmit_chars_pio(struct uart_port *port)
 		if (!(readl_relaxed(port->membase + ofs->isr) & USART_SR_TXE))
 			break;
 		writel_relaxed(xmit->buf[xmit->tail], port->membase + ofs->tdr);
+
 		xmit->tail = (xmit->tail + 1) & (UART_XMIT_SIZE - 1);
 		port->icount.tx++;
+
+		/* Only send one char at a time, if ibt is enabled */
+		if (stm32_port->support_ibt && port->ibt.enabled)
+		    break;
 	}
 
 	/* rely on TXE irq (mask or unmask) for sending remaining data */
@@ -765,9 +819,17 @@ static irqreturn_t stm32_usart_interrupt(int irq, void *ptr)
 		}
 	}
 
-	if ((sr & USART_SR_TXE) && !(stm32_port->tx_ch)) {
+	if ((((sr & USART_SR_TC) && (stm32_port->support_ibt && port->ibt.enabled)) ||
+	     ((sr & USART_SR_TXE) && !(stm32_port->support_ibt && port->ibt.enabled))) && !(stm32_port->tx_ch)) {
 		spin_lock(&port->lock);
-		stm32_usart_transmit_chars(port);
+
+		if (port->ibt.enabled) {
+		    stm32_usart_tx_interrupt_disable(port);
+			hrtimer_start(&stm32_port->ibt_timer, stm32_port->ibt_time_ns, HRTIMER_MODE_REL);
+		} else {
+		    stm32_usart_transmit_chars(port);
+		}
+
 		spin_unlock(&port->lock);
 	}
 
@@ -868,8 +930,14 @@ static void stm32_usart_start_tx(struct uart_port *port)
 	struct stm32_port *stm32_port = to_stm32_port(port);
 	struct serial_rs485 *rs485conf = &port->rs485;
 	struct circ_buf *xmit = &port->state->xmit;
+	const struct stm32_usart_offsets *ofs = &stm32_port->info->ofs;
 
 	if (uart_circ_empty(xmit) && !port->x_char)
+		return;
+
+    /* Do not start again, if IBT is active and a transmission is currently ongoing */
+	if ((stm32_port->support_ibt && port->ibt.enabled && hrtimer_active(&stm32_port->ibt_timer)) ||
+		(stm32_port->support_ibt && port->ibt.enabled && readl_relaxed(port->membase + ofs->cr1) & USART_CR1_TCIE))
 		return;
 
 	if (rs485conf->flags & SER_RS485_ENABLED) {
@@ -1455,6 +1523,15 @@ static int stm32_usart_init_port(struct stm32_port *stm32port,
 
 	stm32port->swap = stm32port->info->cfg.has_swap &&
 		of_property_read_bool(pdev->dev.of_node, "rx-tx-swap");
+
+	stm32port->support_ibt =
+		of_property_read_bool(pdev->dev.of_node, "support-ibt");
+
+	if(stm32port->support_ibt) {
+		port->ibt_config = stm32_usart_config_ibt;
+		hrtimer_init(&stm32port->ibt_timer, CLOCK_REALTIME, HRTIMER_MODE_REL);
+		stm32port->ibt_timer.function = stm32_usart_ibt_timer_function;
+	}
 
 	stm32port->fifoen = stm32port->info->cfg.has_fifo;
 	if (stm32port->fifoen) {
