@@ -151,4 +151,17 @@ struct serial_iso7816 {
 	__u32	reserved[5];
 };
 
+/*
+ * Serial interface for controlling interbyte timing settings on chips / drivers suitable
+ * support. Set with TIOCSIBT and get with TIOCGIBT if supported by
+ * your platform.
+ */
+struct serial_ibt {
+    bool    enabled;
+    __u32   interbyte_time_ns;  /* Time between two bytes in ns */
+    __u32	reserved[8];		/* Memory is cheap, new structs
+					   are a royal PITA .. */
+};
+
+
 #endif /* _UAPI_LINUX_SERIAL_H */

@@ -276,6 +276,9 @@ struct stm32_port {
 	bool hw_flow_control;
 	bool swap;		 /* swap RX & TX pins */
 	bool fifoen;
+	bool support_ibt;   /* Enables interbyte timing support */
+	ktime_t ibt_time_ns;/* Time between bytes */
+	struct hrtimer ibt_timer;
 	int rxftcfg;		/* RX FIFO threshold CFG      */
 	int txftcfg;		/* TX FIFO threshold CFG      */
 	bool wakeup_src;

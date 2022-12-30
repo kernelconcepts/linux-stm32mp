@@ -1363,6 +1363,59 @@ static int uart_set_iso7816_config(struct uart_port *port,
 	return 0;
 }
 
+static int uart_get_ibt_config(struct uart_port *port,
+				   struct serial_ibt __user *ibt)
+{
+	unsigned long flags;
+	struct serial_ibt aux;
+
+	if (!port->ibt_config)
+		return -ENOTTY;
+
+	spin_lock_irqsave(&port->lock, flags);
+	aux = port->ibt;
+	spin_unlock_irqrestore(&port->lock, flags);
+
+	if (copy_to_user(ibt, &aux, sizeof(aux)))
+		return -EFAULT;
+
+	return 0;
+}
+
+static int uart_set_ibt_config(struct uart_port *port,
+				   struct serial_ibt __user *ibt_user)
+{
+	struct serial_ibt ibt;
+	int i, ret;
+	unsigned long flags;
+
+	if (!port->ibt_config)
+		return -ENOTTY;
+
+	if (copy_from_user(&ibt, ibt_user, sizeof(*ibt_user)))
+		return -EFAULT;
+
+	/*
+	 * There are 5 words reserved for future use. Check that userspace
+	 * doesn't put stuff in there to prevent breakages in the future.
+	 */
+	for (i = 0; i < 8; i++)
+		if (ibt.reserved[i])
+			return -EINVAL;
+
+	spin_lock_irqsave(&port->lock, flags);
+	ret = port->ibt_config(port, &ibt);
+	spin_unlock_irqrestore(&port->lock, flags);
+
+	if (ret)
+		return ret;
+
+	if (copy_to_user(ibt_user, &port->ibt, sizeof(port->ibt)))
+		return -EFAULT;
+
+	return 0;
+}
+
 /*
  * Called via sys_ioctl.  We can use spin_lock_irq() here.
  */
@@ -1439,6 +1492,14 @@ uart_ioctl(struct tty_struct *tty, unsigned int cmd, unsigned long arg)
 
 	case TIOCGISO7816:
 		ret = uart_get_iso7816_config(state->uart_port, uarg);
+		break;
+
+	case TIOCSIBT:
+		ret = uart_set_ibt_config(state->uart_port, uarg);
+		break;
+
+	case TIOCGIBT:
+		ret = uart_get_ibt_config(state->uart_port, uarg);
 		break;
 	default:
 		if (uport->ops->ioctl)
