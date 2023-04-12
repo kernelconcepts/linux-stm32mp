@@ -115,6 +115,7 @@ struct st7789v {
 	struct drm_panel panel;
 	struct spi_device *spi;
 	struct gpio_desc *reset;
+	struct gpio_desc *dc;
 	struct regulator *power;
 };
 
@@ -133,15 +134,26 @@ static int st7789v_spi_write(struct st7789v *ctx, enum st7789v_prefix prefix,
 {
 	struct spi_transfer xfer = { };
 	struct spi_message msg;
-	u16 txbuf = ((prefix & 1) << 8) | data;
 
-	spi_message_init(&msg);
+    spi_message_init(&msg);
 
-	xfer.tx_buf = &txbuf;
-	xfer.bits_per_word = 9;
-	xfer.len = sizeof(txbuf);
+    if (!IS_ERR(ctx->dc)) {
+        gpiod_set_value(ctx->dc, (prefix == ST7789V_DATA) ? 1 : 0);
+	    xfer.tx_buf = &data;
+	    xfer.bits_per_word = 8;
+	    xfer.len = sizeof(data);
+    } else {
+        u16 txbuf = ((prefix & 1) << 8) | data;
 
-	spi_message_add_tail(&xfer, &msg);
+	    spi_message_init(&msg);
+
+	    xfer.tx_buf = &txbuf;
+	    xfer.bits_per_word = 9;
+	    xfer.len = sizeof(txbuf);    
+    }
+
+    spi_message_add_tail(&xfer, &msg);
+
 	return spi_sync(ctx->spi, &msg);
 }
 
@@ -165,6 +177,7 @@ static const struct drm_display_mode default_mode = {
 	.vsync_start = 320 + 8,
 	.vsync_end = 320 + 8 + 4,
 	.vtotal = 320 + 8 + 4 + 4,
+	.flags = DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC, 
 };
 
 static int st7789v_get_modes(struct drm_panel *panel,
@@ -209,6 +222,84 @@ static int st7789v_prepare(struct drm_panel *panel)
 
 	/* We need to wait 120ms after a sleep out command */
 	msleep(120);
+
+
+#if 1
+	ST7789V_TEST(ret, st7789v_write_command(ctx, 0x36));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0xC0));
+	ST7789V_TEST(ret, st7789v_write_command(ctx, 0x21));
+// Display and color format setting
+	ST7789V_TEST(ret, st7789v_write_command(ctx, 0X36));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0X14)); ////00
+	ST7789V_TEST(ret, st7789v_write_command(ctx, 0X3A));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0X55)); // 16BIT
+//ST7789V Frame rate setting
+	ST7789V_TEST(ret, st7789v_write_command(ctx, 0XB2));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0x0c)); ////0c
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0x0c)); ////0c
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0x00));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0x33));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0x33));
+	ST7789V_TEST(ret, st7789v_write_command(ctx, 0XB7));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0X35)); //
+	ST7789V_TEST(ret, st7789v_write_command(ctx, 0XB8));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0X2f)); //
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0X2b));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0X2f));
+	ST7789V_TEST(ret, st7789v_write_command(ctx, 0XBB));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0X22)); //15
+	ST7789V_TEST(ret, st7789v_write_command(ctx, 0XC0));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0X29)); ////2c
+	ST7789V_TEST(ret, st7789v_write_command(ctx, 0XC2));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0X01));
+	ST7789V_TEST(ret, st7789v_write_command(ctx, 0XC3));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0X13));
+	ST7789V_TEST(ret, st7789v_write_command(ctx, 0XC4));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0X20)); //
+	ST7789V_TEST(ret, st7789v_write_command(ctx, 0XC6));
+
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0X0f)); //60HZ dot inversion
+	ST7789V_TEST(ret, st7789v_write_command(ctx, 0XD0));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0XA4)); //
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0XA1)); //
+	ST7789V_TEST(ret, st7789v_write_command(ctx, 0Xe8));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0X03)); //
+	ST7789V_TEST(ret, st7789v_write_command(ctx, 0Xe9));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0X0d)); //
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0X12));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0X00));
+// ST7789V gamma setting
+	ST7789V_TEST(ret, st7789v_write_command(ctx, 0xE0));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0xD0));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0x0A));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0x0F));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0x0A));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0x0A));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0x26));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0x35));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0x3F));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0x4D));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0x29));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0x14));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0x14));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0x2E));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0x32));
+	ST7789V_TEST(ret, st7789v_write_command(ctx, 0xE1));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0xD0));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0x0A));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0x10));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0x0B));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0x09));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0x25));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0x36));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0x40));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0x4C));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0x28));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0x14));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0x14));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0x2D));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, 0x32));
+#else 
 
 	ST7789V_TEST(ret, st7789v_write_command(ctx,
 						MIPI_DCS_SET_ADDRESS_MODE));
@@ -298,6 +389,8 @@ static int st7789v_prepare(struct drm_panel *panel)
 
 	ST7789V_TEST(ret, st7789v_write_command(ctx, MIPI_DCS_ENTER_INVERT_MODE));
 
+
+#endif
 	ST7789V_TEST(ret, st7789v_write_command(ctx, ST7789V_RAMCTRL_CMD));
 	ST7789V_TEST(ret, st7789v_write_data(ctx, ST7789V_RAMCTRL_DM_RGB |
 					     ST7789V_RAMCTRL_RM_RGB));
@@ -311,7 +404,7 @@ static int st7789v_prepare(struct drm_panel *panel)
 					     ST7789V_RGBCTRL_HSYNC_HIGH |
 					     ST7789V_RGBCTRL_PCLK_HIGH));
 	ST7789V_TEST(ret, st7789v_write_data(ctx, ST7789V_RGBCTRL_VBP(8)));
-	ST7789V_TEST(ret, st7789v_write_data(ctx, ST7789V_RGBCTRL_HBP(20)));
+	ST7789V_TEST(ret, st7789v_write_data(ctx, ST7789V_RGBCTRL_HBP(20)));	
 
 	return 0;
 }
@@ -377,6 +470,10 @@ static int st7789v_probe(struct spi_device *spi)
 		dev_err(&spi->dev, "Couldn't get our reset line\n");
 		return PTR_ERR(ctx->reset);
 	}
+
+	ctx->dc = devm_gpiod_get_optional(&spi->dev, "dc", GPIOD_OUT_LOW);
+	if (IS_ERR(ctx->dc))
+		dev_err(&spi->dev, "Failed to get gpio 'dc'\n");
 
 	ret = drm_panel_of_backlight(&ctx->panel);
 	if (ret)
