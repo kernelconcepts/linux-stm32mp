@@ -199,8 +199,8 @@ static unsigned int stm32_usart_calc_iso7816_psc(struct uart_port *port,
 	u64 mck_rate;
 
 	mck_rate = (u64)clk_get_rate(stm32_port->clk);
-	do_div(mck_rate, iso7816conf->clk * 2);
-	psc = mck_rate;
+
+    psc = ((mck_rate - 1) / (iso7816conf->clk * 2)) + 1;
 
     iso7816conf->clk = clk_get_rate(stm32_port->clk) / 2 / psc;    
       
@@ -242,16 +242,16 @@ static int stm32_usart_config_iso7816(struct uart_port *port,
         // Enable smartcard mode, before reading out the bits below...
     	stm32_usart_set_bits(port, ofs->cr3, USART_CR3_SCEN);
     	
-		if (iso7816conf->tg > 255) {
-			dev_err(port->dev, "ISO7816: Timeguard exceeding 255\n");
-			memset(iso7816conf, 0, sizeof(struct serial_iso7816));
-			ret = -EINVAL;
-			goto err_out;
-		}    
+	if (iso7816conf->tg > 255) {
+		dev_err(port->dev, "ISO7816: Timeguard exceeding 255\n");
+		memset(iso7816conf, 0, sizeof(struct serial_iso7816));
+		ret = -EINVAL;
+		goto err_out;
+	}    
 
-		cr1 = readl_relaxed(port->membase + ofs->cr1);
-		cr2 = readl_relaxed(port->membase + ofs->cr2);
-		cr3 = readl_relaxed(port->membase + ofs->cr3);
+	cr1 = readl_relaxed(port->membase + ofs->cr1);
+	cr2 = readl_relaxed(port->membase + ofs->cr2);
+	cr3 = readl_relaxed(port->membase + ofs->cr3);
 
         /* Disable conflicting mode settings */
         cr2 &= ~USART_CR2_LINEN;
@@ -261,84 +261,86 @@ static int stm32_usart_config_iso7816(struct uart_port *port,
         cr3 &= ~(USART_CR3_CTSE | USART_CR3_RTSE);
    
         /* Configure 8 Bit word length + parity = 9 bit */
-		cr1 |= USART_CR1_M0;
-		cr1 &= ~USART_CR1_M1;
+	cr1 |= USART_CR1_M0;
+	cr1 &= ~USART_CR1_M1;
 		
         /* Enable parity generation, set even parity */
-		cr1 |= USART_CR1_PCE;
-		cr1 &= ~USART_CR1_PS;
-
-        /* Configure 1.5 stop bits */
-		cr2 |= USART_CR2_STOP_1_5B;
-        		        
+	cr1 |= USART_CR1_PCE;
+	cr1 &= ~USART_CR1_PS;
+       		        
         /* Enable clock generation, 1st. edge, clock polarity low */
         cr2 &= ~(USART_CR2_CPHA | USART_CR2_CPOL);        		        
         cr2 |= USART_CR2_CLKEN;        		        
                 
-		if ((iso7816conf->flags & SER_ISO7816_T_PARAM)
-		    == SER_ISO7816_T(0)) {
-		    cr3 |= USART_CR3_NACK;
-		} else if ((iso7816conf->flags & SER_ISO7816_T_PARAM)
-			   == SER_ISO7816_T(1)) {
-		    cr3 &= ~USART_CR3_NACK;
-		} else {
-			dev_err(port->dev, "ISO7816: Type not supported\n");
-			memset(iso7816conf, 0, sizeof(struct serial_iso7816));
-			ret = -EINVAL;
-			goto err_out;
-		}
+	if ((iso7816conf->flags & SER_ISO7816_T_PARAM) 
+			== SER_ISO7816_T(0)) {
+		cr3 |= USART_CR3_NACK;
+        	/* Configure 1.5 stop bits */
+        	cr2 &= ~USART_CR2_STOP_MASK;
+		cr2 |= USART_CR2_STOP_1_5B;		    
+	} else if ((iso7816conf->flags & SER_ISO7816_T_PARAM) 
+			== SER_ISO7816_T(1)) {
+		cr3 &= ~USART_CR3_NACK;
+		/* Configure 1 stop bits */
+		cr2 &= ~USART_CR2_STOP_MASK;
+	} else {
+		dev_err(port->dev, "ISO7816: Type not supported\n");
+		memset(iso7816conf, 0, sizeof(struct serial_iso7816));
+		ret = -EINVAL;
+		goto err_out;
+	}
 		
-		/* Set guard time */
+	/* Set guard time */
 		
-		psc = stm32_usart_calc_iso7816_psc(port, iso7816conf);
+	psc = stm32_usart_calc_iso7816_psc(port, iso7816conf);
 		
-		if (psc & ~USART_GTPR_PSC_MASK_SC) {
-			dev_err(port->dev, "ISO7816: No valid prescaler for ISO7816 clk value found\n");
-			memset(iso7816conf, 0, sizeof(struct serial_iso7816));
-			ret = -EINVAL;
-			goto err_out;		
-		}
+	if (psc & ~USART_GTPR_PSC_MASK_SC) {
+		dev_err(port->dev, "ISO7816: No valid prescaler for ISO7816 clk value found\n");
+		memset(iso7816conf, 0, sizeof(struct serial_iso7816));
+		ret = -EINVAL;
+		goto err_out;		
+	}
 		
-		brr = stm32_usart_calc_iso7816_fidi(port, iso7816conf) * psc * 2;
-		if (brr == 0) {
-			dev_warn(port->dev, "ISO7816 Invalid Fi/Di value\n");
-			memset(iso7816conf, 0, sizeof(struct serial_iso7816));
-			ret = -EINVAL;
-			goto err_out;
-		}
+	brr = stm32_usart_calc_iso7816_fidi(port, iso7816conf) * psc * 2;
+	if (brr == 0) {
+		dev_warn(port->dev, "ISO7816 Invalid Fi/Di value\n");
+		memset(iso7816conf, 0, sizeof(struct serial_iso7816));
+		ret = -EINVAL;
+		goto err_out;
+	}
 			
-		gtpr = (iso7816conf->tg << USART_GTPR_GT_SHIFT) & USART_GTPR_GT_MASK;
+	gtpr = (iso7816conf->tg << USART_GTPR_GT_SHIFT) & USART_GTPR_GT_MASK;
         gtpr |= psc & USART_GTPR_PSC_MASK_SC;
 		
-		if (!(port->iso7816.flags & SER_ISO7816_ENABLED)) {
-			/* port not yet in iso7816 mode: store configuration */
-			stm32_port->backup_brr = readl_relaxed(port->membase + ofs->brr);
-			stm32_port->backup_gtpr = readl_relaxed(port->membase + ofs->gtpr);
+	if (!(port->iso7816.flags & SER_ISO7816_ENABLED)) {
+		/* port not yet in iso7816 mode: store configuration */
+		stm32_port->backup_brr = readl_relaxed(port->membase + ofs->brr);
+		stm32_port->backup_gtpr = readl_relaxed(port->membase + ofs->gtpr);
 
-			stm32_port->backup_cr1 = readl_relaxed(port->membase + ofs->cr1);
-			stm32_port->backup_cr2 = readl_relaxed(port->membase + ofs->cr1);
-			stm32_port->backup_cr3 = readl_relaxed(port->membase + ofs->cr1);
-		}			
+		stm32_port->backup_cr1 = readl_relaxed(port->membase + ofs->cr1);
+		stm32_port->backup_cr2 = readl_relaxed(port->membase + ofs->cr2);
+		stm32_port->backup_cr3 = readl_relaxed(port->membase + ofs->cr3);
+	}			
 
-		writel_relaxed(gtpr, port->membase + ofs->gtpr);
-		writel_relaxed(brr, port->membase + ofs->brr);
+	writel_relaxed(gtpr, port->membase + ofs->gtpr);
+	writel_relaxed(brr, port->membase + ofs->brr);
 		
         writel_relaxed(cr1, port->membase + ofs->cr1);
-		writel_relaxed(cr2, port->membase + ofs->cr2);
+	writel_relaxed(cr2, port->membase + ofs->cr2);
         writel_relaxed(cr3, port->membase + ofs->cr3);		
 
     } else {
         /* back to last RS232 settings */
-   		memset(iso7816conf, 0, sizeof(struct serial_iso7816));
+   	memset(iso7816conf, 0, sizeof(struct serial_iso7816));
     
         // Disable smartcard mode, manually...
     	stm32_usart_clr_bits(port, ofs->cr3, USART_CR3_SCEN);    
     
-		writel_relaxed(stm32_port->backup_gtpr, port->membase + ofs->gtpr);
-		writel_relaxed(stm32_port->backup_brr, port->membase + ofs->brr);				
+	writel_relaxed(stm32_port->backup_gtpr, port->membase + ofs->gtpr);
+	writel_relaxed(stm32_port->backup_brr, port->membase + ofs->brr);				
         
         writel_relaxed(stm32_port->backup_cr1, port->membase + ofs->cr1);
-		writel_relaxed(stm32_port->backup_cr2, port->membase + ofs->cr2);
+	writel_relaxed(stm32_port->backup_cr2, port->membase + ofs->cr2);
         writel_relaxed(stm32_port->backup_cr3, port->membase + ofs->cr3);		
     }
     port->iso7816 = *iso7816conf;    
